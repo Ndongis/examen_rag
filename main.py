@@ -12,7 +12,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.document import Document
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
+from fastapi.responses import JSONResponse
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -49,6 +49,7 @@ modele = None
 
 
 # ─── Text splitting ────────────────────────────────────────────────────────────
+
 
 def split_by_sections(text: str, filename: str) -> list[dict]:
     text = re.sub(r'\s+', ' ', text)
@@ -287,3 +288,9 @@ def question(body: QuestionRequest):
 def get_intents():
     """Retourne la liste des intentions reconnues et leurs mots-clés."""
     return INTENTS
+
+@app.get("/ping")
+def runpod_ping():
+    # Retourne explicitement un code HTTP 200
+    return JSONResponse(status_code=200, content={"status": "healthy"})
+    
