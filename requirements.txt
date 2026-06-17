@@ -1,0 +1,20 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+
+# LangChain
+langchain==0.3.0
+langchain-community==0.3.0
+langchain-text-splitters==0.3.0
+
+# PDF
+pypdf==4.3.1
+
+# Embeddings & vector store
+sentence-transformers==3.1.1
+faiss-cpu==1.8.0
+
+# LLM
+transformers==4.44.2
+torch==2.4.1
+accelerate==0.34.2
