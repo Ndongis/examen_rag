@@ -152,6 +152,7 @@ def recuperer_contexte(
     k: int = 5,
     max_caracteres: int = 2000,
 ) -> tuple[str, list]:
+    print("récupérer contxte")
     docs = base_vectorielle.similarity_search(question, k=k)
     morceaux = []
     total = 0
@@ -173,7 +174,9 @@ def poser_question(
     k: int = 5,
     afficher_sources: bool = False,
 ) -> str | dict:
+    print("poser question")
     contexte, docs = recuperer_contexte(vectorstore, question, k=k)
+    print("construire prompt")
     prompt = construire_prompt(contexte, question)
 
     entrees = tokeniseur(
@@ -182,16 +185,16 @@ def poser_question(
         truncation=True,
         max_length=2048,
     ).to(modele.device)
-
+    print("tokenizeur")
     sorties = modele.generate(
         **entrees,
         **CONFIG_GENERATION,
         pad_token_id=tokeniseur.eos_token_id,
         eos_token_id=tokeniseur.eos_token_id,
     )
-
+    print("Generation de la réponse")
     reponse = tokeniseur.decode(sorties[0], skip_special_tokens=True).strip()
-
+    print("Reponse")
     if "Réponse:" in reponse:
         reponse = reponse.split("Réponse:")[-1].strip()
 
