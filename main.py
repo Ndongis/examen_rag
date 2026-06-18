@@ -2,7 +2,7 @@ import re
 import os
 import torch
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -18,12 +18,13 @@ from fastapi.responses import JSONResponse
 
 PDF_FOLDER = os.getenv("PDF_FOLDER", "./pdfs")
 NOM_MODELE = os.getenv("MODEL_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+CACHE_DIR = os.getenv("CACHE_DIR", "./models_cache")
 CONFIG_GENERATION = {
     "max_new_tokens": 200,
-    "temperature": 0,
-    "top_p": 1.0,
-    "repetition_penalty": 1.1,
     "do_sample": False,
+    "repetition_penalty": 1.1,
+    "use_cache": True,  # KV-cache GPU activé
 }
 
 INTENTS = {
@@ -49,7 +50,6 @@ modele = None
 
 
 # ─── Text splitting ────────────────────────────────────────────────────────────
-
 
 def split_by_sections(text: str, filename: str) -> list[dict]:
     text = re.sub(r'\s+', ' ', text)
@@ -93,14 +93,21 @@ def split_by_sections(text: str, filename: str) -> list[dict]:
 
 def load_documents(folder_path: str) -> list[Document]:
     all_chunks = []
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path, exist_ok=True)
+        return []
+        
     for file in os.listdir(folder_path):
         if file.endswith(".pdf"):
             path = os.path.join(folder_path, file)
-            loader = PyPDFLoader(path)
-            pages = loader.load()
-            full_text = " ".join([p.page_content for p in pages])
-            structured = split_by_sections(full_text, file)
-            all_chunks.extend(structured)
+            try:
+                loader = PyPDFLoader(path)
+                pages = loader.load()
+                full_text = " ".join([p.page_content for p in pages])
+                structured = split_by_sections(full_text, file)
+                all_chunks.extend(structured)
+            except Exception as e:
+                print(f"❌ Erreur lors de la lecture de {file}: {e}")
 
     documents = [
         Document(
@@ -121,14 +128,24 @@ def load_documents(folder_path: str) -> list[Document]:
 def charger_modele(nom_modele: str):
     tok = AutoTokenizer.from_pretrained(nom_modele)
     tok.pad_token = tok.eos_token
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    tok.padding_side = "left"
+
     mod = AutoModelForCausalLM.from_pretrained(
         nom_modele,
-        torch_dtype=dtype,
-        device_map="auto",
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
+        attn_implementation="flash_attention_2",
         low_cpu_mem_usage=True,
     )
     mod.eval()
+    
+    # ⚠️ torch.compile peut causer des instabilités avec .generate(). 
+    # Si des erreurs surviennent, commentez la ligne ci-dessous.
+    try:
+        mod = torch.compile(mod, mode="reduce-overhead")
+    except Exception as e:
+        print(f"⚠️ torch.compile échoué, passage en mode standard : {e}")
+        
     return tok, mod
 
 
@@ -140,7 +157,7 @@ def construire_prompt(contexte: str, question: str) -> str:
         "Réponds uniquement avec les informations du contexte, en français.\n"
         "Si l'information n'est pas dans le contexte, dis \"Information non disponible\".\n"
         "Surtout n'hallucinez, ne créez pas et n'inventez pas.\n"
-        "Base tout juste sur le contexte pour répondre aux questions.\n"
+        "Base tout juste sur le contexte pour répondre aux questions.\n\n"
         f"Contexte:\n{contexte}\n\n"
         f"Question:\n{question}\n\n"
         "Réponse:\n"
@@ -153,7 +170,6 @@ def recuperer_contexte(
     k: int = 5,
     max_caracteres: int = 2000,
 ) -> tuple[str, list]:
-    print("récupérer contxte")
     docs = base_vectorielle.similarity_search(question, k=k)
     morceaux = []
     total = 0
@@ -170,36 +186,31 @@ def recuperer_contexte(
 
 
 @torch.inference_mode()
-def poser_question(
-    question: str,
-    k: int = 5,
-    afficher_sources: bool = False,
-) -> str | dict:
-    print("poser question")
+def poser_question(question: str, k: int = 5, afficher_sources: bool = False):
     contexte, docs = recuperer_contexte(vectorstore, question, k=k)
-    print("construire prompt")
     prompt = construire_prompt(contexte, question)
 
     entrees = tokeniseur(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048,
-    ).to(modele.device)
-    print("tokenizeur")
-    sorties = modele.generate(
-        **entrees,
-        **CONFIG_GENERATION,
-        pad_token_id=tokeniseur.eos_token_id,
-        eos_token_id=tokeniseur.eos_token_id,
-    )
-    print("Generation de la réponse")
-    reponse = tokeniseur.decode(sorties[0], skip_special_tokens=True).strip()
-    print("Reponse")
-    if "Réponse:" in reponse:
-        reponse = reponse.split("Réponse:")[-1].strip()
+        prompt, return_tensors="pt", truncation=True, max_length=1800
+    ).to("cuda")
 
-    reponse = reponse.replace(": ", ".\n")
+    input_length = entrees.input_ids.shape[1]
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        sorties = modele.generate(
+            **entrees,
+            **CONFIG_GENERATION,
+            pad_token_id=tokeniseur.eos_token_id,
+            eos_token_id=tokeniseur.eos_token_id,
+        )
+
+    # 💎 FIX: Extraire UNIQUEMENT les nouveaux tokens générés (évite le bug du split)
+    nouveaux_tokens = sorties[0][input_length:]
+    reponse = tokeniseur.decode(nouveaux_tokens, skip_special_tokens=True).strip()
+
+    # Nettoyages annexes
+    reponse = reponse.replace("\\n", "\n")
+    reponse = re.sub(r' {2,}', ' ', reponse)
 
     if afficher_sources:
         sources = [doc.metadata for doc in docs]
@@ -214,13 +225,23 @@ def poser_question(
 async def lifespan(app: FastAPI):
     global vectorstore, tokeniseur, modele
 
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
     print("⏳ Chargement des documents PDF…")
     documents = load_documents(PDF_FOLDER)
     print(f"✅ {len(documents)} documents chargés.")
 
+    if not documents:
+        print("⚠️ Aucun document trouvé dans le dossier PDF. Initialisation d'une base vide.")
+        # Fallback pour éviter que FAISS ne crash s'il n'y a pas de PDFs
+        documents = [Document(page_content="Base vide initiale.", metadata={"filiere": "Aucune", "section": "Aucune"})]
+
     print("⏳ Construction du vectorstore…")
     embedding_model = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name=EMBEDDING_MODEL,
+        cache_folder=CACHE_DIR,
+        model_kwargs={"device": "cuda"},
+        encode_kwargs={"batch_size": 64},
     )
     vectorstore = FAISS.from_documents(documents, embedding_model)
     print("✅ Vectorstore prêt.")
@@ -230,7 +251,6 @@ async def lifespan(app: FastAPI):
     print("✅ Modèle chargé.")
 
     yield
-
     print("👋 Arrêt du serveur.")
 
 
@@ -268,10 +288,10 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/question", response_model=ReponseSimple | ReponseAvecSources)
+@app.post("/question", response_model=Union[ReponseSimple, ReponseAvecSources])
 def question(body: QuestionRequest):
     if vectorstore is None or modele is None:
-        raise HTTPException(status_code=503, detail="Modèle non encore chargé.")
+        raise HTTPException(status_code=503, detail="Modèle non encore chargé ou base vide.")
 
     resultat = poser_question(
         question=body.question,
@@ -286,11 +306,9 @@ def question(body: QuestionRequest):
 
 @app.get("/intents")
 def get_intents():
-    """Retourne la liste des intentions reconnues et leurs mots-clés."""
     return INTENTS
+
 
 @app.get("/ping")
 def runpod_ping():
-    # Retourne explicitement un code HTTP 200
     return JSONResponse(status_code=200, content={"status": "healthy"})
-    

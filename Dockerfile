@@ -11,6 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
+    # 1. Installez d'abord PyTorch (et wheel, requis pour compiler)
+RUN pip install --no-cache-dir wheel torch
+
+# 2. Installez ENTIÈREMENT APART flash-attn une fois que torch est présent
+RUN pip install flash-attn --no-build-isolation
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
