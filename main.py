@@ -251,6 +251,7 @@ async def lifespan(app: FastAPI):
     print("✅ Modèle chargé.")
 
     yield
+    
     print("👋 Arrêt du serveur.")
 
 

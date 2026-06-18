@@ -11,12 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-    # 1. Installez d'abord PyTorch (et wheel, requis pour compiler)
-RUN pip install --no-cache-dir wheel torch
+# 1. On s'assure d'avoir les outils de base
+RUN pip install --no-cache-dir wheel setuptools
 
-# 2. Installez ENTIÈREMENT APART flash-attn une fois que torch est présent
-RUN pip install flash-attn --no-build-isolation
-
+# 2. On installe Flash Attention pré-compilé (Aucune compilation requise !)
+RUN pip install flash-attn --no-build-isolation --extra-index-url https://flashattentions.blob.core.windows.net/wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
